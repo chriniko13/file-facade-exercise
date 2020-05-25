@@ -12,6 +12,7 @@ import java.lang.annotation.Target;
 import java.nio.channels.FileLock;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.StampedLock;
@@ -292,6 +293,8 @@ public class ParserFacade {
 	private void writeToFile(String content, Charset encoding, FileOutputStream out) throws IOException {
 		byte[] contentBytes = content.getBytes(encoding);
 		out.write(contentBytes, 0, contentBytes.length);
+		out.flush();
+		out.getFD().sync();
 	}
 
 	private long acquireReadLock() {
@@ -361,6 +364,20 @@ public class ParserFacade {
 
 		public E2 getSecond() {
 			return second;
+		}
+
+		@Override public boolean equals(Object o) {
+			if (this == o)
+				return true;
+			if (!(o instanceof Pair))
+				return false;
+			Pair<?, ?> pair = (Pair<?, ?>) o;
+			return Objects.equals(getFirst(), pair.getFirst()) &&
+					Objects.equals(getSecond(), pair.getSecond());
+		}
+
+		@Override public int hashCode() {
+			return Objects.hash(getFirst(), getSecond());
 		}
 	}
 

@@ -7,6 +7,7 @@ import org.junit.Test;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Optional;
 import java.util.concurrent.BrokenBarrierException;
@@ -129,16 +130,22 @@ public class ParserFacadeTest {
 
 		// given
 		parserFacade.setAcquireGlobalFileLock(true);
+		int runs = 200;
 
-		int runs = 100;
+		// Note: comment/uncomment if you want to run for more than one process.
+		//Path testFile = Paths.get("/Users/chriniko/mytxt.txt"); // Note: the file should be created outside of IDE, and should be clear (no contents)
+		//int numberOfConcurrentProcesses = 1; // Note: modify accordingly
 
+		// Note: comment/uncomment if you want to run for one process only.
 		int idx = ThreadLocalRandom.current().nextInt(10);
 		Path testFile = Files.createTempFile("testFile__", idx + "");
+
 		parserFacade.setFile(testFile.toFile());
 
+		//parserFacade.clearContent();
 
 		for (int i = 0; i < runs; i++) {
-			checkMultiThreadOperationsSafety(false);
+			checkMultiThreadOperationsSafety(i, true, 1);
 		}
 	}
 
@@ -153,7 +160,7 @@ public class ParserFacadeTest {
 		parserFacade.setFile(testFile.toFile());
 
 		for (int i = 0; i < runs; i++) {
-			checkMultiThreadOperationsSafety(false);
+			checkMultiThreadOperationsSafety(i, false, 1);
 		}
 	}
 
@@ -169,9 +176,8 @@ public class ParserFacadeTest {
 		Path testFile = Files.createTempFile("testFile__", idx + "");
 		parserFacade.setFile(testFile.toFile());
 
-
 		for (int i = 0; i < runs; i++) {
-			checkMultiThreadOperationsSafety(true);
+			checkMultiThreadOperationsSafety(i, true, 1);
 		}
 
 	}
@@ -186,16 +192,15 @@ public class ParserFacadeTest {
 		Path testFile = Files.createTempFile("testFile__", idx + "");
 		parserFacade.setFile(testFile.toFile());
 
-
 		for (int i = 0; i < runs; i++) {
-			checkMultiThreadOperationsSafety(true);
+			checkMultiThreadOperationsSafety(i, true, 1);
 		}
 
 	}
 
 	// --- utils ---
 
-	private void checkMultiThreadOperationsSafety(boolean tryOptimisticReads) {
+	private void checkMultiThreadOperationsSafety(int run, boolean tryOptimisticReads, int numberOfConcurrentProcesses) {
 
 		// create some readers to create traffic for read lock.
 		int readersSize = 70;
@@ -219,17 +224,22 @@ public class ParserFacadeTest {
 					readersOnReadyState.arriveAndDeregister();
 
 					while (readersRunning.get()) {
-						parserFacade.getContent();
-						Thread.sleep(70);
-						Thread.yield();
-						parserFacade.getContentWithoutUnicode();
-						Thread.sleep(40);
-						Thread.yield();
-
+						try {
+							parserFacade.getContent();
+							Thread.sleep(70);
+							Thread.yield();
+							parserFacade.getContentWithoutUnicode();
+							Thread.sleep(40);
+							Thread.yield();
+						} catch (ParserFacade.CouldNotAcquireGlobalFileLock ex) { // Note: we need to catch when running multiple processes for global file lock.
+							// Note: in cases where we run more than one junit test case process to check global file lock (native OS file lock)
+							//       we just retry....
+							System.out.println(Thread.currentThread().getName() + " --- will retry, reader error message: " + ex.getMessage());
+						}
 					}
-				} catch (Exception e) {
-					System.err.println(Thread.currentThread().getName() + " -- reader error: " + e.getMessage());
-					// let the reader exit.
+
+				} catch (Exception e) { // Note: on unknown exception, let the reader exit.
+					System.err.println(Thread.currentThread().getName() + " -- reader UNKNOWN error: " + e.getMessage());
 				}
 			});
 		});
@@ -241,8 +251,8 @@ public class ParserFacadeTest {
 
 		Phaser writersFinishedWork = new Phaser(workersSize + 1 /* plus one for junit test thread / waiter role */);
 
-		CyclicBarrier writersRendezvousBeforeWork = new CyclicBarrier(workersSize,
-				() -> System.out.println("all workers (size = " + workersSize + ") at 'fair' position to access/test save contents method")
+		CyclicBarrier writersRendezvousBeforeWork = new CyclicBarrier(workersSize
+				//, () -> System.out.println("all workers (size = " + workersSize + ") at 'fair' position to access/test save contents method")
 		);
 
 		ExecutorService writers = Executors.newFixedThreadPool(workersSize, new ThreadFactory() {
@@ -272,39 +282,89 @@ public class ParserFacadeTest {
 				}
 
 				// ~~ actual work ~~
-				for (int i=0; i<timesEachWorkerWillSave; i++) {
-					if (tryOptimisticReads) {
 
-						Optional<Long> optimisticReadStampH = Optional.empty();
-						while (!optimisticReadStampH.isPresent()) {
-							ParserFacade.Pair<String, Optional<Long>> result = parserFacade.getContent();
-							optimisticReadStampH = result.getSecond();
+				int counter = timesEachWorkerWillSave;
+				while (counter > 0) {
+
+					try {
+
+						if (tryOptimisticReads) {
+
+							Optional<Long> optimisticReadStampH = Optional.empty();
+							while (!optimisticReadStampH.isPresent()) {
+								ParserFacade.Pair<String, Optional<Long>> result = parserFacade.getContent();
+								optimisticReadStampH = result.getSecond();
+							}
+							parserFacade.saveContent("1,", true, optimisticReadStampH.get());
+
+						} else {
+							parserFacade.saveContent("1,", true);
 						}
-						parserFacade.saveContent("1,", true, optimisticReadStampH.get());
+						counter--;
 
-					} else {
-						parserFacade.saveContent("1,", true);
+					} catch (ParserFacade.CouldNotAcquireGlobalFileLock ex) { // Note: we need to catch when running multiple processes for global file lock.
+						// Note: in cases where we run more than one junit test case process to check global file lock (native OS file lock)
+						//       we just retry....
+						System.out.println(Thread.currentThread().getName() + " ### retrying... error message: " + ex.getMessage() + " --- progress: " + counter);
 					}
+
 				}
+
 				writersFinishedWork.arriveAndDeregister();
 			});
 
-		}
+		} // workers operation END.
 
 		// then
 		writersFinishedWork.arriveAndAwaitAdvance();
 		readersRunning.set(false);
 
-		String contents = parserFacade.getContent().getFirst();
+		String contents = "";
+		while (true) {
+			try {
+				contents = parserFacade.getContent().getFirst();
+				break;
+			} catch (ParserFacade.CouldNotAcquireGlobalFileLock e) {
+				// Note: retry until you get the contents
+				System.out.println(Thread.currentThread().getName() + " ###### could not extract content... retrying... error message: " + e.getMessage());
+
+				try {
+					Thread.sleep(300);
+				} catch (InterruptedException ignored) {
+				}
+			}
+		}
 
 		int sum = Arrays.stream(contents.split(","))
 				.map(Integer::parseInt)
 				.reduce(0, Integer::sum);
+		System.out.printf("[%s] DEBUG run: %d --- sum is: %d\n", Thread.currentThread().getName(), run, sum);
 
-		assertEquals(workersSize * timesEachWorkerWillSave, sum);
+		if (numberOfConcurrentProcesses > 1) {
+
+			int totalWriteFromOneProcess = workersSize * timesEachWorkerWillSave;
+			int totalWritesFromAllProcesses = totalWriteFromOneProcess * numberOfConcurrentProcesses;
+
+			assertTrue(sum >= totalWriteFromOneProcess);
+			assertTrue(sum <= totalWritesFromAllProcesses);
+
+		} else {
+			assertEquals(
+					workersSize * timesEachWorkerWillSave,
+					sum
+			);
+		}
 
 		//cleanup
-		parserFacade.clearContent();
+		for (; ; ) {
+			try {
+				parserFacade.clearContent();
+				break;
+			} catch (ParserFacade.CouldNotAcquireGlobalFileLock e) {
+				// Note: just retry, until you clear the contents.
+			}
+		}
+		readersRunning.set(false);
 
 		writers.shutdown();
 		readers.shutdown();
